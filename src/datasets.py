@@ -77,10 +77,14 @@ class UnderwaterImageDataset(Dataset):
 
         sample = {"image": tensor, "gt_path": str(gt_path)}
 
-        # 如果存在 input_dir，记录对应路径（可用于日志或未来条件输入）
+        # 如果存在 input_dir，加载并返回输入图像，方便可视化对比
         if self.input_dir:
             candidate = self.input_dir / gt_path.name
             if candidate.exists():
+                input_img = Image.open(candidate).convert("RGB")
+                sample["input"] = self.transform(input_img)
                 sample["input_path"] = str(candidate)
+            else:
+                sample["input_path"] = None
 
         return sample

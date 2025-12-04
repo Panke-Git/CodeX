@@ -23,6 +23,7 @@ from torch.cuda import amp
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 import yaml
+import matplotlib.pyplot as plt
 
 from src.datasets import UnderwaterImageDataset
 from src.diffusion import GaussianDiffusion
@@ -104,6 +105,82 @@ def save_samples(images: torch.Tensor, save_dir: Path, epoch: int, save_grid: bo
     if save_grid:
         grid = make_grid(images, nrow=max(1, int(len(images) ** 0.5)))
         save_image(grid, save_dir / f"epoch{epoch:04d}_grid.png")
+
+
+def tensor_to_01(x: torch.Tensor) -> torch.Tensor:
+    """将张量从 [-1,1] 映射到 [0,1]，便于可视化。"""
+
+    return (x.clamp(-1, 1) + 1) * 0.5
+
+
+def save_comparison_grid(
+    model: nn.Module,
+    diffusion: GaussianDiffusion,
+    dataloader: DataLoader,
+    device: torch.device,
+    save_path: Path,
+    num_samples: int = 5,
+) -> None:
+    """使用验证集生成输入/GT/输出对比的网格图，每行 3 张图。"""
+
+    model.eval()
+    original_model = diffusion.model
+    diffusion.model = model
+
+    images_to_plot = []
+    collected = 0
+    with torch.no_grad():
+        for batch in dataloader:
+            gt = batch["image"].to(device)
+            input_tensor = batch.get("input")
+            if input_tensor is not None:
+                input_tensor = input_tensor.to(device)
+            else:
+                input_tensor = gt
+
+            bsz = gt.size(0)
+            noise = torch.randn_like(gt)
+            t = torch.randint(0, diffusion.timesteps, (bsz,), device=device).long()
+            x_noisy = diffusion.q_sample(gt, t, noise)
+            predicted_noise = model(x_noisy, t)
+            recon = diffusion.predict_start_from_noise(x_noisy, t, predicted_noise)
+
+            input_vis = tensor_to_01(input_tensor).cpu()
+            gt_vis = tensor_to_01(gt).cpu()
+            recon_vis = tensor_to_01(recon).cpu()
+
+            for i in range(bsz):
+                images_to_plot.extend([input_vis[i], gt_vis[i], recon_vis[i]])
+                collected += 1
+                if collected >= num_samples:
+                    grid = make_grid(images_to_plot, nrow=3)
+                    save_image(grid, save_path)
+                    diffusion.model = original_model
+                    return
+
+    diffusion.model = original_model
+
+
+def plot_loss_curve(metrics: List[Dict[str, float]], save_path: Path) -> None:
+    """绘制训练/验证损失曲线并保存。"""
+
+    epochs = [m["epoch"] for m in metrics]
+    train_losses = [m.get("train_loss") for m in metrics]
+    val_losses = [m.get("val_loss") for m in metrics]
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, train_losses, label="Train Loss", marker="o")
+    if any(v is not None for v in val_losses):
+        plt.plot(epochs, val_losses, label="Val Loss", marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training Loss Curve")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path)
+    plt.close()
 
 
 def save_checkpoint(model: nn.Module, optimizer: optim.Optimizer, epoch: int, save_dir: Path) -> None:
@@ -238,6 +315,7 @@ def train(cfg: Dict[str, Any]) -> None:
         val_loss = None
         val_ssim = None
         val_psnr = None
+        model_to_eval = None
         if val_loader is not None:
             model_to_eval = ema_model if ema_model is not None else model
             original_model = diffusion.model
@@ -260,8 +338,8 @@ def train(cfg: Dict[str, Any]) -> None:
                     recon = diffusion.predict_start_from_noise(x_noisy, t, predicted_noise)
 
                     # 反归一化到 [0,1] 计算图像质量指标
-                    images_01 = (images.clamp(-1, 1) + 1) * 0.5
-                    recon_01 = (recon.clamp(-1, 1) + 1) * 0.5
+                    images_01 = tensor_to_01(images)
+                    recon_01 = tensor_to_01(recon)
                     total_ssim += ssim(recon_01, images_01).sum().item()
                     total_psnr += psnr(recon_01, images_01).sum().item()
                     total_loss += loss_val.item() * images.size(0)
@@ -311,6 +389,18 @@ def train(cfg: Dict[str, Any]) -> None:
                 torch.save(state, ckpt_path)
                 best_records[metric]["path"] = str(ckpt_path)
 
+                # 保存对比图（输入、GT、输出），覆盖之前的最佳文件
+                if model_to_eval is not None:
+                    comparison_path = ckpt_dir / f"best_{metric}_comparison.png"
+                    save_comparison_grid(
+                        model=model_to_eval,
+                        diffusion=diffusion,
+                        dataloader=val_loader,
+                        device=device,
+                        save_path=comparison_path,
+                        num_samples=5,
+                    )
+
         if val_loss is not None:
             maybe_save_best("loss", val_loss)
             maybe_save_best("ssim", val_ssim)
@@ -334,6 +424,10 @@ def train(cfg: Dict[str, Any]) -> None:
             diffusion.model = model  # 采样后换回训练模型
 
     print("训练完成！模型与采样结果已保存。")
+
+    # 绘制损失曲线并保存到输出目录
+    if metrics_history:
+        plot_loss_curve(metrics_history, output_dir / "loss_curve.png")
 
 
 if __name__ == "__main__":
