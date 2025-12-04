@@ -60,6 +60,17 @@ class GaussianDiffusion(nn.Module):
             + extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
+    def predict_start_from_noise(
+        self, x_t: torch.Tensor, t: torch.Tensor, noise: torch.Tensor
+    ) -> torch.Tensor:
+        """根据预测噪声反推 x0。"""
+
+        sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / extract(self.alphas_cumprod, t, x_t.shape))
+        sqrt_recipm1_alphas_cumprod = torch.sqrt(
+            1.0 / extract(self.alphas_cumprod, t, x_t.shape) - 1
+        )
+        return sqrt_recip_alphas_cumprod * x_t - sqrt_recipm1_alphas_cumprod * noise
+
     def p_losses(self, x_start: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
         """预测噪声的 MSE 损失。"""
         x_noisy = self.q_sample(x_start, t, noise)

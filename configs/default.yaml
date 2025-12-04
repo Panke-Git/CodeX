@@ -2,7 +2,9 @@
 # 所有参数均可以根据需要进行修改，不需要改动训练脚本
 experiment:
   name: "ddpm_underwater"
-  output_dir: "runs/ddpm_underwater"  # 日志、检查点和样本的输出目录
+  model_name: "UNet"                  # 用于组织保存目录的模型名称
+  # 根目录在训练开始时会自动创建子目录：{model_name}/{yyyymmdd-HHMM}
+  output_root: "runs"                # 日志、检查点、样本、指标的根目录
   seed: 42
 
 # 数据集相关配置
@@ -48,7 +50,6 @@ train:
   ema_decay: 0.999       # 如果需要指数滑动平均，可设置 <1.0；设为 1 可关闭
   log_interval: 50
   sample_interval: 1      # 多少个 epoch 进行一次采样保存
-  checkpoint_interval: 5  # 多少个 epoch 保存一次模型检查点
   mixed_precision: true
 
 # 采样配置
