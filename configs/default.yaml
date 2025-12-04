@@ -1,0 +1,58 @@
+# 训练超参数配置文件
+# 所有参数均可以根据需要进行修改，不需要改动训练脚本
+experiment:
+  name: "ddpm_underwater"
+  output_dir: "runs/ddpm_underwater"  # 日志、检查点和样本的输出目录
+  seed: 42
+
+# 数据集相关配置
+# 约定目录结构：
+#   /data/Train/input, /data/Train/GT, /data/Val/input, /data/Val/GT
+# 如果不需要验证集，可将 val 节点留空或删除。
+data:
+  train:
+    input_dir: "/data/Train/input"
+    gt_dir: "/data/Train/GT"
+  val:
+    input_dir: "/data/Val/input"
+    gt_dir: "/data/Val/GT"
+  image_size: 256          # 图像训练尺寸，训练时会做中心裁剪并缩放
+  channels: 3               # 图像通道数，RGB 为 3
+  batch_size: 4
+  val_batch_size: 4        # 验证批次大小，可与训练不同
+  num_workers: 4
+  augmentation:
+    horizontal_flip: true   # 是否随机水平翻转
+    color_jitter: true      # 是否对亮度/对比度/饱和度/色相做轻微扰动
+
+# 扩散过程的参数
+# beta_start/beta_end 定义线性噪声调度，num_steps 是扩散时间步。
+diffusion:
+  num_steps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+
+# U-Net 结构参数
+model:
+  base_channels: 64     # U-Net 的基础通道数
+  channel_mults: [1, 2, 4, 8]  # 不同层的通道倍率
+  num_res_blocks: 2     # 每个尺度的 ResBlock 数量
+  dropout: 0.1
+
+# 优化器与训练循环
+train:
+  num_epochs: 100
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  grad_clip: 1.0
+  ema_decay: 0.999       # 如果需要指数滑动平均，可设置 <1.0；设为 1 可关闭
+  log_interval: 50
+  sample_interval: 1      # 多少个 epoch 进行一次采样保存
+  checkpoint_interval: 5  # 多少个 epoch 保存一次模型检查点
+  mixed_precision: true
+
+# 采样配置
+sampling:
+  num_samples: 4          # 每次采样生成的图像数量
+  ddim_steps: 100         # 使用 DDIM 采样时的步数（小于训练步数即可）
+  save_grid: true         # 是否将采样结果以网格方式保存
