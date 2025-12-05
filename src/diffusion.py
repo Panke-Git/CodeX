@@ -127,5 +127,6 @@ class GaussianDiffusion(nn.Module):
 def extract(a: torch.Tensor, t: torch.Tensor, x_shape: torch.Size) -> torch.Tensor:
     """从预存向量中按时间步提取对应系数，并 reshape 以便广播。"""
     batch_size = t.shape[0]
-    out = a.gather(-1, t.cpu()).to(t.device)
+    # 保持索引与被提取张量在同一设备，避免 CPU/GPU 混用导致的错误
+    out = a.gather(-1, t.to(a.device))
     return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
