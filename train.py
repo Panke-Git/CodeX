@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.cuda import amp
+import torch.amp as amp
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 import yaml
@@ -261,7 +261,10 @@ def train(cfg: Dict[str, Any]) -> None:
         lr=cfg["train"]["learning_rate"],
         weight_decay=cfg["train"].get("weight_decay", 0.0),
     )
-    scaler = amp.GradScaler(enabled=cfg["train"].get("mixed_precision", True))
+    scaler = amp.GradScaler(
+        device_type="cuda" if device.type == "cuda" else "cpu",
+        enabled=cfg["train"].get("mixed_precision", True),
+    )
 
     ema_decay = cfg["train"].get("ema_decay", 1.0)
     ema_model = None
@@ -290,7 +293,7 @@ def train(cfg: Dict[str, Any]) -> None:
             noise = torch.randn_like(images)
             t = torch.randint(0, cfg["diffusion"]["num_steps"], (images.shape[0],), device=device).long()
 
-            with amp.autocast(enabled=scaler.is_enabled()):
+            with amp.autocast(device_type=device.type, enabled=scaler.is_enabled()):
                 loss = diffusion.p_losses(images, t, noise)
 
             scaler.scale(loss).backward()

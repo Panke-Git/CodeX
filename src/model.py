@@ -123,15 +123,14 @@ class UNetModel(nn.Module):
         # 下采样路径
         self.downs = nn.ModuleList()
         ch = in_channels
-        channels: List[int] = [ch]
+        skip_channels: List[int] = []
         for mult in channel_mults:
             out_ch = base_channels * mult
             for _ in range(num_res_blocks):
                 self.downs.append(ResidualBlock(ch, out_ch, time_dim, dropout))
                 ch = out_ch
-                channels.append(ch)
+                skip_channels.append(ch)
             self.downs.append(Downsample(ch))
-            channels.append(ch)
 
         # 中间层
         self.mid = nn.ModuleList(
@@ -143,10 +142,13 @@ class UNetModel(nn.Module):
 
         # 上采样路径
         self.ups = nn.ModuleList()
+        # 仅为跳连的残差块构建反向 skip 通道栈，避免包含 Downsample 产生的空间尺度不一致特征
+        skip_stack = list(reversed(skip_channels))
         for mult in reversed(channel_mults):
             out_ch = base_channels * mult
-            for _ in range(num_res_blocks + 1):  # +1 以匹配下采样添加的 Downsample
-                self.ups.append(ResidualBlock(ch + channels.pop(), out_ch, time_dim, dropout))
+            for _ in range(num_res_blocks):
+                skip_ch = skip_stack.pop()
+                self.ups.append(ResidualBlock(ch + skip_ch, out_ch, time_dim, dropout))
                 ch = out_ch
             self.ups.append(Upsample(ch))
 
@@ -166,7 +168,6 @@ class UNetModel(nn.Module):
                 skips.append(x)
             else:
                 x = layer(x)
-                skips.append(x)
 
         # 中间
         for layer in self.mid:
