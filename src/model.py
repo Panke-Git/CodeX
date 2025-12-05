@@ -30,6 +30,20 @@ class SinusoidalPosEmb(nn.Module):
         return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
 
+def _group_norm(num_channels: int, num_groups: int = 8) -> nn.GroupNorm:
+    """Construct a GroupNorm that safely divides channels.
+
+    GroupNorm 要求 num_channels 可以被 num_groups 整除，输入通道数为 3 时直接使用 8 会报错。
+    这里自动选择一个不超过 num_groups 的最大因子，若没有可用因子则退化为 LayerNorm 等价的单组。
+    """
+
+    # 选择不超过 num_groups 的最大因子，至少为 1
+    candidate = min(num_groups, num_channels)
+    while num_channels % candidate != 0 and candidate > 1:
+        candidate -= 1
+    return nn.GroupNorm(candidate, num_channels)
+
+
 class ResidualBlock(nn.Module):
     """带时间步调制的残差块。"""
 
@@ -41,12 +55,12 @@ class ResidualBlock(nn.Module):
         )
 
         self.block1 = nn.Sequential(
-            nn.GroupNorm(8, in_ch),
+            _group_norm(in_ch),
             nn.SiLU(),
             nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
         )
         self.block2 = nn.Sequential(
-            nn.GroupNorm(8, out_ch),
+            _group_norm(out_ch),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
@@ -136,7 +150,7 @@ class UNetModel(nn.Module):
                 ch = out_ch
             self.ups.append(Upsample(ch))
 
-        self.final_norm = nn.GroupNorm(8, ch)
+        self.final_norm = _group_norm(ch)
         self.final_act = nn.SiLU()
         self.final_conv = nn.Conv2d(ch, in_channels, kernel_size=3, padding=1)
 
