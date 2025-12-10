@@ -86,6 +86,24 @@ def create_dataloader(
     data_cfg: Dict,
     shuffle: bool = True,
 ) -> DataLoader:
+    required_keys = ["input_dir", "target_dir"]
+    missing = [k for k in required_keys if k not in split_cfg]
+    if missing:
+        alt_keys = {"target_dir": "gt_dir"}
+        recovered = {}
+        for key in missing:
+            alt = alt_keys.get(key)
+            if alt and alt in split_cfg:
+                recovered[key] = split_cfg[alt]
+        if recovered:
+            split_cfg = {**split_cfg, **recovered}
+        else:
+            available = ", ".join(sorted(split_cfg.keys())) or "<none>"
+            raise KeyError(
+                f"Missing required data keys {missing} in split config. Available keys: {available}. "
+                "Expected fields: input_dir and target_dir (ground truth directory)."
+            )
+
     dataset = UnderwaterPairDataset(
         input_dir=split_cfg["input_dir"],
         target_dir=split_cfg["target_dir"],

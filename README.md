@@ -12,7 +12,7 @@ This repository trains a conditional diffusion model (DDPM) to enhance underwate
 - `src/utils.py`: Training helpers (logging, checkpoints, seeds).
 
 ## Quick start
-1. Update `configs/default.yaml` to match your dataset layout (`/dataset/Train/input`, `/dataset/Train/GT`, `/dataset/Val/input`, `/dataset/Val/GT`).
+1. Update `configs/default.yaml` to match your dataset layout (`/dataset/Train/input`, `/dataset/Train/GT`, `/dataset/Val/input`, `/dataset/Val/GT`). Ensure each split has both `input_dir` and `target_dir` (you may also use `gt_dir` as an alias for `target_dir`).
 2. Install dependencies:
    ```bash
    pip install -r requirements.txt
