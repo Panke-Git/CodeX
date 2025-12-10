@@ -81,32 +81,32 @@ class UnderwaterPairDataset(Dataset):
         }
 
 
+def _require_dir(split_cfg: Dict, key: str, alias: Optional[str] = None) -> str:
+    """Resolve a required directory key with an optional alias and clear errors."""
+
+    if key in split_cfg and split_cfg[key] is not None:
+        return split_cfg[key]
+    if alias and alias in split_cfg and split_cfg[alias] is not None:
+        return split_cfg[alias]
+    available = ", ".join(sorted(split_cfg.keys())) or "<none>"
+    alias_msg = f" or '{alias}'" if alias else ""
+    raise KeyError(
+        f"Missing required data key '{key}'{alias_msg} in split config. "
+        f"Available keys: {available}. Provide the directory path for ground-truth images."
+    )
+
+
 def create_dataloader(
     split_cfg: Dict,
     data_cfg: Dict,
     shuffle: bool = True,
 ) -> DataLoader:
-    required_keys = ["input_dir", "target_dir"]
-    missing = [k for k in required_keys if k not in split_cfg]
-    if missing:
-        alt_keys = {"target_dir": "gt_dir"}
-        recovered = {}
-        for key in missing:
-            alt = alt_keys.get(key)
-            if alt and alt in split_cfg:
-                recovered[key] = split_cfg[alt]
-        if recovered:
-            split_cfg = {**split_cfg, **recovered}
-        else:
-            available = ", ".join(sorted(split_cfg.keys())) or "<none>"
-            raise KeyError(
-                f"Missing required data keys {missing} in split config. Available keys: {available}. "
-                "Expected fields: input_dir and target_dir (ground truth directory)."
-            )
+    input_dir = _require_dir(split_cfg, "input_dir")
+    target_dir = _require_dir(split_cfg, "target_dir", alias="gt_dir")
 
     dataset = UnderwaterPairDataset(
-        input_dir=split_cfg["input_dir"],
-        target_dir=split_cfg["target_dir"],
+        input_dir=input_dir,
+        target_dir=target_dir,
         image_size=data_cfg["image_size"],
         channels=data_cfg["channels"],
         augmentation=data_cfg.get("augmentation") if shuffle else None,
