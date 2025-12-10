@@ -1,59 +1,34 @@
-"""U-Net backbone for DDPM.
-
-该文件实现了一个简化版的 U-Net，用于预测扩散过程中的噪声。结构包含：
-- 残差块（ResBlock）
-- 时间步嵌入（Sinusoidal positional embedding + MLP）
-- 下采样与上采样模块
-"""
-
 from typing import List
 
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class SinusoidalPosEmb(nn.Module):
-    """将时间步编码为固定的正弦/余弦位置嵌入。"""
-
     def __init__(self, dim: int) -> None:
         super().__init__()
         self.dim = dim
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         half_dim = self.dim // 2
-        # 公式来自 Transformer 的位置编码，使用 log space
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
+        emb_scale = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb_scale)
         emb = t[:, None] * emb[None, :]
         return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
 
 def _group_norm(num_channels: int, num_groups: int = 8) -> nn.GroupNorm:
-    """Construct a GroupNorm that safely divides channels.
-
-    GroupNorm 要求 num_channels 可以被 num_groups 整除，输入通道数为 3 时直接使用 8 会报错。
-    这里自动选择一个不超过 num_groups 的最大因子，若没有可用因子则退化为 LayerNorm 等价的单组。
-    """
-
-    # 选择不超过 num_groups 的最大因子，至少为 1
-    candidate = min(num_groups, num_channels)
-    while num_channels % candidate != 0 and candidate > 1:
-        candidate -= 1
-    return nn.GroupNorm(candidate, num_channels)
+    groups = min(num_groups, num_channels)
+    while num_channels % groups != 0 and groups > 1:
+        groups -= 1
+    return nn.GroupNorm(groups, num_channels)
 
 
 class ResidualBlock(nn.Module):
-    """带时间步调制的残差块。"""
-
     def __init__(self, in_ch: int, out_ch: int, time_dim: int, dropout: float) -> None:
         super().__init__()
-        self.time_mlp = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(time_dim, out_ch),
-        )
-
+        self.time_mlp = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, out_ch))
         self.block1 = nn.Sequential(
             _group_norm(in_ch),
             nn.SiLU(),
@@ -65,21 +40,46 @@ class ResidualBlock(nn.Module):
             nn.Dropout(dropout),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
         )
-
-        self.res_conv = nn.Conv2d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else nn.Identity()
+        self.res_conv = (
+            nn.Conv2d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else nn.Identity()
+        )
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         h = self.block1(x)
-        # time embedding broadcast to spatial dims
         time_emb = self.time_mlp(t)[:, :, None, None]
         h = h + time_emb
         h = self.block2(h)
         return h + self.res_conv(x)
 
 
-class Downsample(nn.Module):
-    """简单的下采样卷积。"""
+class AttentionBlock(nn.Module):
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.group_norm = _group_norm(channels)
+        self.q = nn.Conv2d(channels, channels, 1)
+        self.k = nn.Conv2d(channels, channels, 1)
+        self.v = nn.Conv2d(channels, channels, 1)
+        self.proj = nn.Conv2d(channels, channels, 1)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.group_norm(x)
+        q = self.q(h)
+        k = self.k(h)
+        v = self.v(h)
+
+        b, c, hgt, wid = q.shape
+        q = q.reshape(b, c, hgt * wid).permute(0, 2, 1)
+        k = k.reshape(b, c, hgt * wid)
+        attn = torch.bmm(q, k) * (c ** -0.5)
+        attn = attn.softmax(dim=-1)
+        v = v.reshape(b, c, hgt * wid).permute(0, 2, 1)
+        out = torch.bmm(attn, v)
+        out = out.permute(0, 2, 1).reshape(b, c, hgt, wid)
+        out = self.proj(out)
+        return out + x
+
+
+class Downsample(nn.Module):
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.conv = nn.Conv2d(channels, channels, kernel_size=3, stride=2, padding=1)
@@ -89,8 +89,6 @@ class Downsample(nn.Module):
 
 
 class Upsample(nn.Module):
-    """转置卷积上采样。"""
-
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.conv = nn.ConvTranspose2d(channels, channels, kernel_size=4, stride=2, padding=1)
@@ -99,16 +97,18 @@ class Upsample(nn.Module):
         return self.conv(x)
 
 
-class UNetModel(nn.Module):
-    """适用于 DDPM 的 U-Net 模型。"""
+class ConditionalUNet(nn.Module):
+    """U-Net backbone that conditions on the input underwater image via channel concatenation."""
 
     def __init__(
         self,
         in_channels: int,
+        cond_channels: int,
         base_channels: int,
         channel_mults: List[int],
         num_res_blocks: int,
         dropout: float,
+        use_attention: bool = True,
     ) -> None:
         super().__init__()
 
@@ -120,9 +120,11 @@ class UNetModel(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
 
-        # 下采样路径
+        self.init_conv = nn.Conv2d(in_channels + cond_channels, base_channels, kernel_size=3, padding=1)
+
         self.downs = nn.ModuleList()
-        ch = in_channels
+        self.attn_down = nn.ModuleList()
+        ch = base_channels
         skip_channels: List[int] = []
         for mult in channel_mults:
             out_ch = base_channels * mult
@@ -130,55 +132,60 @@ class UNetModel(nn.Module):
                 self.downs.append(ResidualBlock(ch, out_ch, time_dim, dropout))
                 ch = out_ch
                 skip_channels.append(ch)
+                self.attn_down.append(AttentionBlock(ch) if use_attention else nn.Identity())
             self.downs.append(Downsample(ch))
+            self.attn_down.append(nn.Identity())
 
-        # 中间层
         self.mid = nn.ModuleList(
             [
                 ResidualBlock(ch, ch, time_dim, dropout),
+                AttentionBlock(ch) if use_attention else nn.Identity(),
                 ResidualBlock(ch, ch, time_dim, dropout),
             ]
         )
 
-        # 上采样路径
         self.ups = nn.ModuleList()
-        # 仅为跳连的残差块构建反向 skip 通道栈，避免包含 Downsample 产生的空间尺度不一致特征
+        self.attn_up = nn.ModuleList()
         skip_stack = list(reversed(skip_channels))
         for mult in reversed(channel_mults):
             out_ch = base_channels * mult
             for _ in range(num_res_blocks):
                 skip_ch = skip_stack.pop()
                 self.ups.append(ResidualBlock(ch + skip_ch, out_ch, time_dim, dropout))
+                self.attn_up.append(AttentionBlock(out_ch) if use_attention else nn.Identity())
                 ch = out_ch
             self.ups.append(Upsample(ch))
+            self.attn_up.append(nn.Identity())
 
         self.final_norm = _group_norm(ch)
         self.final_act = nn.SiLU()
         self.final_conv = nn.Conv2d(ch, in_channels, kernel_size=3, padding=1)
 
-    def forward(self, x: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
-        # 计算时间嵌入
-        t = self.time_embedding(timesteps)
+    def forward(self, noisy: torch.Tensor, timesteps: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        t_emb = self.time_embedding(timesteps)
+        x = self.init_conv(torch.cat([noisy, cond], dim=1))
 
-        # 下采样，保存跳连
         skips = []
-        for layer in self.downs:
+        for layer, attn in zip(self.downs, self.attn_down):
             if isinstance(layer, ResidualBlock):
-                x = layer(x, t)
+                x = layer(x, t_emb)
+                x = attn(x)
                 skips.append(x)
             else:
                 x = layer(x)
 
-        # 中间
         for layer in self.mid:
-            x = layer(x, t)
+            if isinstance(layer, ResidualBlock):
+                x = layer(x, t_emb)
+            else:
+                x = layer(x)
 
-        # 上采样，拼接 skip features
-        for layer in self.ups:
+        for layer, attn in zip(self.ups, self.attn_up):
             if isinstance(layer, ResidualBlock):
                 skip = skips.pop()
                 x = torch.cat([x, skip], dim=1)
-                x = layer(x, t)
+                x = layer(x, t_emb)
+                x = attn(x)
             else:
                 x = layer(x)
 
